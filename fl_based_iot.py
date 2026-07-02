@@ -805,7 +805,7 @@ class Application(Node):
         
         # Load the model
         try:
-            self.model = torch.load(self.model_path, map_location=self.device)
+            self.model = torch.load(self.model_path, map_location=self.device, weights_only=False)
         except Exception as e:
             print(f"[{self.node_name}] Warning: Failed to load full model object: {e}. Trying to load state dict...")
             self.model = MiniTransformerAutoencoder(
@@ -816,7 +816,10 @@ class Application(Node):
                 n_layers=2,
                 seq_len=seq_len
             ).to(self.device)
-            self.model.load_state_dict(torch.load(self.model_path, map_location=self.device))
+            try:
+                self.model.load_state_dict(torch.load(self.model_path, map_location=self.device, weights_only=True))
+            except Exception as e2:
+                self.model.load_state_dict(torch.load(self.model_path, map_location=self.device, weights_only=False))
             
         self.model.eval()
         print(f"[{self.node_name}] Model loaded successfully for XAI.")
