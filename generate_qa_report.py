@@ -790,6 +790,95 @@ def build_pdf(filename="Project_Interview_Defense_Guide.pdf"):
         a_style
     ))
 
+    # --- SECTION 10 ---
+    story.append(PageBreak())
+    story.append(Paragraph("10. Rapid Fire Explanations", h1_style))
+
+    story.append(Paragraph("Q1: Explain your project in 30 seconds.", q_style))
+    story.append(Paragraph(
+        "A: I designed and implemented a hierarchical Federated Learning simulation for IoT network intrusion detection from scratch. "
+        "Edge nodes pre-process traffic into packet sequences and train a custom PyTorch Mini Transformer Autoencoder strictly on "
+        "benign flows. The updates are quantized to float16, relayed by a Gateway buffer, aggregated at Fog and Cloud layers via "
+        "FedAvg, and evaluated using stratified test splits. Anomalies are flagged based on a dynamic reconstruction error threshold, "
+        "and SHAP is integrated to provide interpretability for the security alerts.",
+        a_style
+    ))
+
+    story.append(Paragraph("Q2: Explain your project in 2 minutes.", q_style))
+    story.append(Paragraph(
+        "A: Centralized network intrusion detection (NIDS) creates major data privacy risks and network bandwidth bottlenecks. "
+        "My project addresses these by implementing a hierarchical Federated Learning simulation across a 5-layer IoT topology. "
+        "Edge sensors pre-process network traffic, exclude target leakage features, and train a Mini Transformer Autoencoder "
+        "strictly on benign traffic to model normal sequence behaviors. To optimize communication costs, local weights are "
+        "quantized to float16 prior to transmission. A Gateway buffers updates in dictionaries to prevent overwrites, and the Fog "
+        "and Cloud aggregate parameters via FedAvg in float32. The final model establishes a relaxed mean + 4*std reconstruction threshold. "
+        "Test sets are partitioned using StratifiedKFold to prevent the 'Zero Support' trap. Reconstruction errors exceeding "
+        "the threshold flag anomalies, and SHAP is applied to interpret feature attributions for incident analysts.",
+        a_style
+    ))
+
+    story.append(Paragraph("Q3: Explain it to HR.", q_style))
+    story.append(Paragraph(
+        "A: I built an AI-based cybersecurity system that protects smart internet-connected devices. Instead of collecting private user "
+        "data onto a central server, the devices learn local security patterns and share only anonymous mathematical updates. This "
+        "system ensures high privacy compliance, saves internet bandwidth, and uses explainable AI so engineers know exactly what "
+        "triggered an intrusion alarm.",
+        a_style
+    ))
+
+    story.append(Paragraph("Q4: Explain it to a non-technical manager.", q_style))
+    story.append(Paragraph(
+        "A: This project secures network traffic across distributed IoT environments without centralizing raw packet logs. By performing "
+        "unsupervised anomaly detection, the system learns normal baseline behaviors and automatically flags new, zero-day attacks "
+        "when traffic patterns deviate. It optimizes communication overhead by 50% via weight compression, buffers uploads to prevent "
+        "data loss during transmission, and provides visual SHAP feature importance charts so operations teams can understand and act "
+        "on security alerts immediately.",
+        a_style
+    ))
+
+    story.append(Paragraph("Q5: Explain it to a Machine Learning engineer.", q_style))
+    story.append(Paragraph(
+        "A: I designed an unsupervised anomaly detection system simulated across a 5-layer Federated Learning topology. Edge nodes scale "
+        "continuous flow features, exclude target leakage columns, and construct sliding sequence windows of length 10. They train a custom "
+        "MiniTransformerAutoencoder (with sinusoidal positional encodings and latent dimension 32) strictly on benign data to minimize "
+        "reconstruction MSE. Model parameter weights are quantized to float16 during uploads to halve payload transmission sizes, buffered "
+        "at the Gateway, and aggregated at the Fog layer via FedAvg. The Cloud Node establishes a global dynamic threshold of Mean(MSE) + 4*Std(MSE) "
+        "and tests it on stratified folds to prevent support bias. Finally, SHAP KernelExplainer is mapped to the model's reconstruction MSE "
+        "output space to visualize feature attribution values.",
+        a_style
+    ))
+
+    # --- SECTION 11 ---
+    story.append(Spacer(1, 10))
+    story.append(Paragraph("11. Common Interview Pitfalls & Mistakes to Avoid", h1_style))
+
+    story.append(Paragraph("Pitfall 1: Claiming 'Federated Learning is completely secure.'", q_style))
+    story.append(Paragraph(
+        "<b>❌ Avoid saying</b>: 'Federated Learning is completely secure.'<br/>"
+        "<b>✔ Say instead</b>: 'Federated Learning improves data privacy by keeping raw data local, but it is not inherently secure against "
+        "all threats. Additional defenses like secure multi-party aggregation (SecAgg) or differential privacy (DP) are required to protect "
+        "the shared weights from model-inversion or membership-inference reconstruction attacks.'",
+        a_style
+    ))
+
+    story.append(Paragraph("Pitfall 2: Saying 'Transformers are always better than other architectures.'", q_style))
+    story.append(Paragraph(
+        "<b>❌ Avoid saying</b>: 'Transformers are always better.'<br/>"
+        "<b>✔ Say instead</b>: 'For this project, the Transformer was selected because its self-attention mechanism excels at modeling "
+        "non-sequential dependencies across flow packets. However, for resource-constrained edge hardware with tight memory limits, "
+        "lightweight LSTMs or traditional Gated Recurrent Units (GRUs) might be preferred depending on latency trade-offs.'",
+        a_style
+    ))
+
+    story.append(Paragraph("Pitfall 3: Stating 'Model accuracy decreased' in a defensive tone.", q_style))
+    story.append(Paragraph(
+        "<b>❌ Avoid saying</b>: 'The model accuracy decreased.'<br/>"
+        "<b>✔ Say instead</b>: 'The early evaluation accuracy was inflated due to target column leakage and sequential test split bias. "
+        "After filtering out the leakage column (Attack_categories) and stratifying test partitions, the evaluation adjusted to a realistic, "
+        "leak-free 84.5% baseline. This represents a robust system improvement rather than a performance drop.'",
+        a_style
+    ))
+
     # Build the document
     doc.build(story, canvasmaker=NumberedCanvas)
 
