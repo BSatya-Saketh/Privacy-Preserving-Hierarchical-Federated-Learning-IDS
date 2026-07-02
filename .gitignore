@@ -1,0 +1,14 @@
+# Dataset
+wustl_hdrl_2024.csv
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter Checkpoints
+.ipynb_checkpoints/
+
+# System Files
+.DS_Store
+Thumbs.db
