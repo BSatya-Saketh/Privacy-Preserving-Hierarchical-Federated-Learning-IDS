@@ -1102,5 +1102,5 @@ if __name__ == "__main__":
     print(f"\n----- Testing -----")
     sim.testing_part()
 
-    # print(f"\n----- Application (XAI) -----")
-    # sim.XAI()
+    print(f"\n----- Application (XAI) -----")
+    sim.XAI()
