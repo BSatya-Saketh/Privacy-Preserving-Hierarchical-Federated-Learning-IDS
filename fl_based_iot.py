@@ -25,7 +25,7 @@ import matplotlib.pyplot as plt
 from collections import deque
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.metrics import mean_squared_error, accuracy_score, classification_report, confusion_matrix
+from sklearn.metrics import mean_squared_error, accuracy_score, classification_report, confusion_matrix, balanced_accuracy_score, matthews_corrcoef, roc_auc_score
 from sklearn.model_selection import train_test_split
 from sklearn.feature_selection import SelectKBest, f_classif, VarianceThreshold
 from sklearn.impute import SimpleImputer
@@ -37,166 +37,181 @@ import shap
 import warnings
 warnings.filterwarnings('ignore')
 
+SEQUENCE_LENGTH = 10
+
 # Set random seeds for reproducibility
 np.random.seed(42)
 torch.manual_seed(42)
 random.seed(42)
 
-# Data Preprocessing Class
+# Data Preprocessing Class (Fit/Transform Pattern to Prevent Data Leakage)
 class preprocess_data():
-    def __init__(self, df):
+    def __init__(self):
         self.le = {}
         self.ss = {}
-        self.feature_selecter = {}
-        self.df = df
+        self.imputers = {}
+        self.inf_means = {}
         self.num_cols = []
         self.cat_cols = []
         self.features = []
         self.target = ""
-        self.clean_df = []
-        self.X = []
-        self.y = []
-        self.X_train = []
-        self.X_test = []
-        self.y_train = []
-        self.y_test = []
+        self.high_cardinality_cols = []
+        self.low_cardinality_cols = []
+        self.dummy_columns = []
+        self.selected_features = []
+        
+        self.variance_threshold_mask = None
+        self.select_k_best_selector = None
+        
+        self.outlier_medians = {}
+        self.outlier_bounds = {}
 
-    def handling_missing_values(self):
-
-        # Set features and target (explicitly exclude Label and Attack_categories to prevent leakage)
-        self.target = 'Label' if 'Label' in self.df.columns else self.df.columns[-1]
-        self.features = [col for col in self.df.columns if col not in [self.target, 'Attack_categories']]
-
-        # Identify types
-        self.num_cols = self.df[self.features].select_dtypes(include=np.number).columns.tolist()
-        self.cat_cols = self.df[self.features].select_dtypes(include=['object']).columns.tolist()
-
-        # Handle infinite values
-        for col in self.df.columns:
-            if pd.api.types.is_numeric_dtype(self.df[col]):
-                mean_val = self.df[col][np.isfinite(self.df[col])].mean()
-                self.df[col] = self.df[col].replace([np.inf, -np.inf], mean_val)
-
-        # Impute numerical
+    def fit(self, df, k=25):
+        df = df.copy()
+        
+        self.target = 'Label' if 'Label' in df.columns else df.columns[-1]
+        self.features = [col for col in df.columns if col not in [self.target, 'Attack_categories']]
+        
+        num_cols = df[self.features].select_dtypes(include=np.number).columns.tolist()
+        cat_cols = df[self.features].select_dtypes(include=['object']).columns.tolist()
+        self.num_cols = num_cols
+        self.cat_cols = cat_cols
+        
+        # 1. Handle infinite values
+        for col in df.columns:
+            if pd.api.types.is_numeric_dtype(df[col]):
+                finite_vals = df[col][np.isfinite(df[col])]
+                mean_val = finite_vals.mean() if len(finite_vals) > 0 else 0.0
+                self.inf_means[col] = mean_val
+                df[col] = df[col].replace([np.inf, -np.inf], mean_val)
+                
+        # 2. Impute numerical
         for col in self.num_cols:
             if col == self.target:
                 continue
-            if self.df[col].isnull().sum() > 0:
-                imputer = SimpleImputer(strategy='mean')
-                self.df[col] = imputer.fit_transform(self.df[[col]])
-
-        # Impute categorical
+            imputer = SimpleImputer(strategy='mean')
+            df[[col]] = imputer.fit_transform(df[[col]])
+            self.imputers[col] = imputer
+            
+        # 3. Impute categorical
         for col in self.cat_cols:
             if col == self.target:
                 continue
-            if self.df[col].isnull().sum() > 0:
-                imputer = SimpleImputer(strategy='most_frequent')
-                self.df[col] = imputer.fit_transform(self.df[[col]])
-
-
-    def scaling_encoding(self):
-        # Recalculate categorical and numeric cols from training features
-        self.num_cols = self.df[self.features].select_dtypes(include=np.number).columns.tolist()
-        self.cat_cols = self.df[self.features].select_dtypes(include=['object']).columns.tolist()
-
-        high_cardinality_cols = []
-        low_cardinality_cols = []
-
+            imputer = SimpleImputer(strategy='most_frequent')
+            df[[col]] = imputer.fit_transform(df[[col]])
+            self.imputers[col] = imputer
+            
+        # 4. Categorical cardinality separation
         for col in self.cat_cols:
-            unique_vals = self.df[col].nunique()
+            unique_vals = df[col].nunique()
             if unique_vals > 10:
-                high_cardinality_cols.append(col)
+                self.high_cardinality_cols.append(col)
             else:
-                low_cardinality_cols.append(col)
-
-        # --- Label encode high-cardinality ---
-        for col in high_cardinality_cols:
+                self.low_cardinality_cols.append(col)
+                
+        # 5. Label encode high-cardinality
+        for col in self.high_cardinality_cols:
             le = LabelEncoder()
-            self.df[col] = le.fit_transform(self.df[col].astype(str))
+            df[col] = le.fit_transform(df[col].astype(str))
             self.le[col] = le
-
-        # --- One-hot encode low-cardinality ---
-        self.df = pd.get_dummies(self.df, columns=low_cardinality_cols, drop_first=True)
-
-        # --- Update numerical columns after encoding (excluding target and leakage sources) ---
-        encoded_features = [c for c in self.df.columns if c not in [self.target, 'Attack_categories']]
-        self.num_cols = self.df[encoded_features].select_dtypes(include=np.number).columns.tolist()
-
-        # --- Standard scaling ---
-        for col in self.num_cols:
-            scaler = StandardScaler()
-            self.df[col] = scaler.fit_transform(self.df[[col]])
-            self.ss[col] = scaler
-
-        # Final features
-        self.features = encoded_features
-
-
-    def handling_outliers(self):
-        for col in self.num_cols:
-            if col == self.target:
-                continue
-            Q1 = self.df[col].quantile(0.25)
-            Q3 = self.df[col].quantile(0.75)
+            
+        # 6. One-hot encode low-cardinality
+        df_encoded = pd.get_dummies(df, columns=self.low_cardinality_cols, drop_first=True)
+        encoded_features = [c for c in df_encoded.columns if c not in [self.target, 'Attack_categories']]
+        self.dummy_columns = [c for c in df_encoded.columns if c != self.target and c != 'Attack_categories']
+        
+        # 7. Fit outlier bounds on numerical columns
+        encoded_num_cols = df_encoded[encoded_features].select_dtypes(include=np.number).columns.tolist()
+        for col in encoded_num_cols:
+            Q1 = df_encoded[col].quantile(0.25)
+            Q3 = df_encoded[col].quantile(0.75)
             IQR = Q3 - Q1
-            lower_bound = Q1 - 1.5 * IQR
-            upper_bound = Q3 + 1.5 * IQR
-
-            outliers = (self.df[col] < lower_bound) | (self.df[col] > upper_bound)
-            num_outliers = outliers.sum()
-
-            if num_outliers > 0:
-                median_val = self.df[col].median()
-                self.df.loc[outliers, col] = median_val
-
-
-    def feature_selection(self, k=10):
-        # Ensure target is numeric
-        if self.df[self.target].dtype == 'object':
-            self.df[self.target] = LabelEncoder().fit_transform(self.df[self.target])
-
+            self.outlier_bounds[col] = (Q1 - 1.5 * IQR, Q3 + 1.5 * IQR)
+            self.outlier_medians[col] = df_encoded[col].median()
+            
+            lower, upper = self.outlier_bounds[col]
+            outliers = (df_encoded[col] < lower) | (df_encoded[col] > upper)
+            df_encoded.loc[outliers, col] = self.outlier_medians[col]
+            
+        # 8. Fit standard scaling
+        for col in encoded_num_cols:
+            scaler = StandardScaler()
+            df_encoded[[col]] = scaler.fit_transform(df_encoded[[col]])
+            self.ss[col] = scaler
+            
+        # 9. Fit feature selection
+        if df_encoded[self.target].dtype == 'object':
+            target_le = LabelEncoder()
+            df_encoded[self.target] = target_le.fit_transform(df_encoded[self.target])
+            self.le[self.target] = target_le
+            
         # Remove constant features
         vt = VarianceThreshold(threshold=0.0)
-        X_vt = vt.fit_transform(self.df[self.features])
-        self.features = [col for col, keep in zip(self.features, vt.get_support()) if keep]
-
-        # Ensure features still exist in df
-        self.features = [f for f in self.features if f in self.df.columns]
-
+        vt.fit(df_encoded[encoded_features])
+        self.variance_threshold_mask = vt.get_support()
+        features_vt = [col for col, keep in zip(encoded_features, self.variance_threshold_mask) if keep]
+        
         # Select K best features
-        selector = SelectKBest(score_func=f_classif, k=min(k, len(self.features)))
-        X_new = selector.fit_transform(self.df[self.features], self.df[self.target])
-        mask = selector.get_support()
-        selected_features = [feat for feat, keep in zip(self.features, mask) if keep]
-
-        # Save selector and update feature list
-        for col in selected_features:
-            self.feature_selecter[col] = selector
-        self.features = selected_features
-
-        # Update df to include only selected features + target
-        self.df = self.df[selected_features + [self.target]]
-
-
-    def split(self):
-        # Prepare final cleaned DataFrame
-        self.clean_df = self.df[self.features + [self.target]]
-
-        # Convert to numpy arrays with proper dtypes
-        self.X = self.df[self.features].values.astype(np.float32)  # Convert to float32
-        self.y = self.df[self.target].values.astype(np.int64) 
-        print("Cleaned Data Shape: ", self.clean_df.shape)
-        print("X Shape: ", self.X.shape)
-        print("y Shape: ", self.y.shape)
-
-    
-    def run(self):
-        self.handling_missing_values()
-        self.scaling_encoding()
-        self.handling_outliers()
-        self.feature_selection(k=25)
-        self.split()
-        return self.clean_df, self.X, self.y
+        selector = SelectKBest(score_func=f_classif, k=min(k, len(features_vt)))
+        selector.fit(df_encoded[features_vt], df_encoded[self.target])
+        self.select_k_best_selector = selector
+        
+        self.selected_features = [feat for feat, keep in zip(features_vt, selector.get_support()) if keep]
+        
+    def transform(self, df):
+        df = df.copy()
+        
+        # 1. Handle infinite values
+        for col in df.columns:
+            if pd.api.types.is_numeric_dtype(df[col]) and col in self.inf_means:
+                df[col] = df[col].replace([np.inf, -np.inf], self.inf_means[col])
+                
+        # 2. Impute numerical & categorical
+        for col, imputer in self.imputers.items():
+            if col in df.columns:
+                df[[col]] = imputer.transform(df[[col]])
+                
+        # 3. Label encode high-cardinality
+        for col in self.high_cardinality_cols:
+            if col in df.columns:
+                le = self.le[col]
+                df[col] = df[col].astype(str)
+                classes_dict = {cls: idx for idx, cls in enumerate(le.classes_)}
+                df[col] = df[col].apply(lambda val: classes_dict.get(val, 0))
+                
+        # 4. One-hot encode low-cardinality
+        has_target = self.target in df.columns
+        target_col = df[self.target].values if has_target else None
+        
+        df_encoded = pd.get_dummies(df, columns=self.low_cardinality_cols, drop_first=True)
+        df_encoded = df_encoded.reindex(columns=self.dummy_columns, fill_value=0)
+        
+        # 5. Handle outliers
+        for col, bounds in self.outlier_bounds.items():
+            if col in df_encoded.columns:
+                lower, upper = bounds
+                outliers = (df_encoded[col] < lower) | (df_encoded[col] > upper)
+                df_encoded.loc[outliers, col] = self.outlier_medians[col]
+                
+        # 6. Standard scaling
+        for col, scaler in self.ss.items():
+            if col in df_encoded.columns:
+                df_encoded[[col]] = scaler.transform(df_encoded[[col]])
+                
+        # 7. Extract selected features
+        X_selected = df_encoded[self.selected_features].values.astype(np.float32)
+        
+        if has_target:
+            if pd.api.types.is_object_dtype(target_col):
+                if self.target in self.le:
+                    target_col = self.le[self.target].transform(target_col)
+                else:
+                    target_col = LabelEncoder().fit_transform(target_col)
+            y_selected = target_col.astype(np.int64)
+        else:
+            y_selected = None
+            
+        return df_encoded[self.selected_features], X_selected, y_selected
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=5000):
@@ -247,8 +262,8 @@ class MiniTransformerAutoencoder(nn.Module):
         x = self.transformer_encoder(x)           # Transformer encoder
         latent_seq = self.encoder_fc(x)           # (batch, seq_len, latent_dim)
 
-        # Use the last timestep as summary representation
-        latent_vector = latent_seq[:, -1, :]      # (batch, latent_dim)
+        # Use Mean Pooling over the sequence time dimension
+        latent_vector = latent_seq.mean(dim=1)      # (batch, latent_dim)
 
         # Classification output
         # logits = self.classifier(latent_vector)   # (batch, 2)
@@ -290,6 +305,7 @@ class Node:
         criterion = nn.MSELoss(reduction='none')
         all_preds = []
         all_targets = []
+        all_mse = []
 
         with torch.no_grad():
             for X, y in test_loader:
@@ -307,9 +323,22 @@ class Node:
                 
                 all_preds.extend(preds.cpu().numpy())
                 all_targets.extend(y.cpu().numpy())
+                all_mse.extend(mse.cpu().numpy())
 
         accuracy = correct / total
+        bal_acc = balanced_accuracy_score(all_targets, all_preds)
+        mcc = matthews_corrcoef(all_targets, all_preds)
+        
+        try:
+            roc_auc = roc_auc_score(all_targets, all_mse)
+        except Exception as e:
+            roc_auc = 0.0
+            print(f"[{self.node_name}] Warning: Could not compute ROC-AUC: {e}")
+
         print(f"Accuracy: {accuracy:.4f}")
+        print(f"Balanced Accuracy: {bal_acc:.4f}")
+        print(f"Matthews Correlation Coefficient (MCC): {mcc:.4f}")
+        print(f"ROC-AUC: {roc_auc:.4f}")
         print("Classification Report:")
         print(classification_report(all_targets, all_preds, target_names=["normal", "anomaly/attack"], zero_division=0))
         print("Confusion Matrix:")
@@ -320,7 +349,7 @@ class Node:
         labels = []
         for i in range(len(X) - seq_len + 1):
             sequences.append(X[i:i+seq_len])
-            labels.append(y[i + seq_len - 1])
+            labels.append(np.max(y[i : i + seq_len]))
         return np.array(sequences), np.array(labels)
 
     def create_test_sequences(self, X, seq_len=10):
@@ -341,25 +370,34 @@ class Edge(Node):
       self.y = y
 
       self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-      self.sequence_length = 10
-      self.epochs = 5
+      self.sequence_length = SEQUENCE_LENGTH
+      self.epochs = 20  # Max epochs
+      self.patience = 3  # Early stopping patience
       self.local_model = None
       self.global_model_weights = None
       self.local_model_weights = None
       self.input_dim = None
+      self.num_training_samples = 0
 
     def receive_global_model(self, global_model_weights):
       print(f"[{self.node_name}] Received global model from Gateway.")
       self.global_model_weights = global_model_weights
 
     def process_data(self):
-      # Filter for normal traffic only (y == 0) and remove any malicious slippage
-      normal_mask = (self.y == 0)
-      X_normal = self.X[normal_mask]
-      num_malicious_discarded = np.sum(self.y != 0)
-      print(f"[{self.node_name}] Training data filtered: {len(X_normal)} normal samples. Discarded {num_malicious_discarded} malicious/anomaly packets to ensure robust clean training.")
+      # Generate sequence windows from all continuous traffic first (preserving temporal continuity)
+      X_seq, y_seq = self.create_sequences_with_labels(self.X, self.y, self.sequence_length)
       
-      self.input_dim = X_normal.shape[1]
+      # Keep only sequence windows that are 100% benign for training the unsupervised autoencoder
+      # Windows containing attack packets are excluded from autoencoder training to ensure
+      # the reconstruction model learns only the distribution of normal network behavior,
+      # while all windows are retained for evaluation.
+      benign_mask = (y_seq == 0)
+      X_benign_seq = X_seq[benign_mask]
+      
+      num_malicious_discarded = np.sum(y_seq != 0)
+      print(f"[{self.node_name}] Sequence windows built: {len(X_seq)} total windows. Keep {len(X_benign_seq)} normal windows. Exclude {num_malicious_discarded} attack windows from training.")
+      
+      self.input_dim = self.X.shape[1]
       print(f"[{self.node_name}] Input dimension: {self.input_dim}")
 
       if self.global_model_weights:
@@ -387,17 +425,28 @@ class Edge(Node):
       print(f"[{self.node_name}] Started training!\n")
 
       # Generate sequences only from benign data
-      if len(X_normal) < self.sequence_length:
+      if len(X_benign_seq) < self.sequence_length:
           raise ValueError(f"[{self.node_name}] Not enough normal samples to create sequences.")
           
-      X_seq = self.create_sequences(X_normal, self.sequence_length)
-      X_tensor = torch.tensor(X_seq, dtype=torch.float32).to(self.device)
+      # Split sequence data into local Train (80%) and local Validation (20%)
+      split_idx = int(0.8 * len(X_benign_seq))
+      indices = np.arange(len(X_benign_seq))
+      np.random.shuffle(indices)
+      train_idx = indices[:split_idx]
+      val_idx = indices[split_idx:]
+      
+      X_train_seq = X_benign_seq[train_idx]
+      X_val_seq = X_benign_seq[val_idx]
+      
+      self.num_training_samples = len(X_train_seq)
+      
+      X_train_tensor = torch.tensor(X_train_seq, dtype=torch.float32)
+      X_val_tensor = torch.tensor(X_val_seq, dtype=torch.float32).to(self.device)
 
-      print(f"[DEBUG] Input tensor stats: min={X_tensor.min().item():.4f}, max={X_tensor.max().item():.4f}, mean={X_tensor.mean().item():.4f}")
-      print(f"[DEBUG] Input tensor shape: {X_tensor.shape}")
+      print(f"[DEBUG] Local Train sequences: {X_train_tensor.shape}, Local Validation: {X_val_tensor.shape}")
 
       # Training starts
-      self.train_local_model(X_tensor, self.epochs)
+      self.train_local_model(X_train_tensor, X_val_tensor, self.epochs, self.patience)
 
     def create_sequences(self, data, seq_len):
       sequences = []
@@ -406,23 +455,60 @@ class Edge(Node):
           sequences.append(seq)
       return np.array(sequences)
 
-    def train_local_model(self, X_tensor, epochs=5):
-      self.local_model.train()
-      optimizer = torch.optim.Adam(self.local_model.parameters(), lr=0.001)
+    def train_local_model(self, X_train_tensor, X_val_tensor, max_epochs=20, patience=3):
+      # Create DataLoader for training set to run mini-batch SGD
+      train_dataset = TensorDataset(X_train_tensor)
+      train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True, pin_memory=True)
+      
+      # Instantiate AdamW optimizer with weight decay regularization
+      optimizer = torch.optim.AdamW(self.local_model.parameters(), lr=0.001, weight_decay=1e-4)
       criterion = nn.MSELoss()
+      
+      best_val_loss = float('inf')
+      best_weights = copy.deepcopy(self.local_model.state_dict())
+      epochs_without_improvement = 0
+      best_epoch = 0
 
-      for epoch in range(epochs):
-          output = self.local_model(X_tensor)
-          loss = criterion(output, X_tensor)
-
-          optimizer.zero_grad()
-          loss.backward()
-          optimizer.step()
-
-          if epoch % 1 == 0:
-              print(f"[{self.node_name}] Epoch {epoch+1}/{epochs} | Loss: {loss.item():.4f}")
-      print(f"[{self.node_name}] Final Local Loss: {loss.item():.4f}")
-
+      for epoch in range(max_epochs):
+          # Train epoch using mini-batches
+          self.local_model.train()
+          epoch_train_loss = 0.0
+          for batch in train_loader:
+              batch_x = batch[0].to(self.device)
+              
+              optimizer.zero_grad()
+              output = self.local_model(batch_x)
+              loss = criterion(output, batch_x)
+              loss.backward()
+              optimizer.step()
+              
+              epoch_train_loss += loss.item() * batch_x.size(0)
+          
+          epoch_train_loss /= len(X_train_tensor)
+          
+          # Validation epoch
+          self.local_model.eval()
+          with torch.no_grad():
+              val_output = self.local_model(X_val_tensor)
+              val_loss = criterion(val_output, X_val_tensor).item()
+              
+          if val_loss < best_val_loss:
+              best_val_loss = val_loss
+              best_weights = copy.deepcopy(self.local_model.state_dict())
+              epochs_without_improvement = 0
+              best_epoch = epoch + 1
+          else:
+              epochs_without_improvement += 1
+              
+          if epoch % 1 == 0 or epochs_without_improvement >= patience:
+              print(f"[{self.node_name}] Epoch {epoch+1}/{max_epochs} | Train Loss: {epoch_train_loss:.4f} | Val Loss: {val_loss:.4f}")
+              
+          if epochs_without_improvement >= patience:
+              print(f"[{self.node_name}] Early stopping triggered. Restoring best model weights from epoch {best_epoch} (Val Loss: {best_val_loss:.4f})")
+              break
+              
+      self.local_model.load_state_dict(best_weights)
+      print(f"[{self.node_name}] Final Local Validation Loss: {best_val_loss:.4f}")
       self.local_model_weights = self.local_model.get_weights()
 
     def send_model_weights(self):
@@ -431,7 +517,8 @@ class Edge(Node):
           quantized_weights = {k: v.to(torch.float16) for k, v in self.local_model_weights.items()}
           packet = {
               'node_id': self.node_id,
-              'weights': quantized_weights
+              'weights': quantized_weights,
+              'num_samples': self.num_training_samples
           }
           self.send_data(packet, self.parent)
 
@@ -439,10 +526,10 @@ class Edge(Node):
 class Gateway(Node):
     def __init__(self, node_id, name):
         super().__init__(node_id, name)
-        self.received_weights = None
+        self.received_weights = {}
         self.global_model_weights = None
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.sequence_length = 10
+        self.sequence_length = SEQUENCE_LENGTH
         self.input_dim = None
         self.local_model = None
         self.local_model_weights = None
@@ -450,16 +537,14 @@ class Gateway(Node):
     def receive_data(self, data, source):
         super().receive_data(data, source)
         if 'weights' in data:
-            if not hasattr(self, 'received_weights') or not isinstance(self.received_weights, dict):
-                self.received_weights = {}
-            self.received_weights[data['node_id']] = data['weights']
+            self.received_weights[data['node_id']] = data
 
     def process_data(self):
         if self.parent:
-            weights_list = list(self.received_weights.values())
+            packets_list = list(self.received_weights.values())
             packet = {
                 'node_id': self.node_id,
-                'weights': weights_list
+                'packets': packets_list
             }
             self.send_data(packet, self.parent)
 
@@ -472,12 +557,11 @@ class Gateway(Node):
     def eval(self, df, X, y, threshold):
         print(f"[{self.node_name}] Testing the local model received from edge devices!")
 
-        # Since Gateway gets weights from children, let's take the first one's weights for local testing
         if not self.received_weights:
             print(f"[{self.node_name}] No model weights available for testing!")
             return
             
-        weights_to_test = list(self.received_weights.values())[0]
+        weights_to_test = list(self.received_weights.values())[0]['weights']
         
         self.df = df
         self.X = X
@@ -491,7 +575,7 @@ class Gateway(Node):
         y_sampled = np.array(self.y)
 
         # Convert and generate sequences
-        X_seq, y_seq = self.create_sequences_with_labels(X_sampled, y_sampled, seq_len=10)
+        X_seq, y_seq = self.create_sequences_with_labels(X_sampled, y_sampled, seq_len=self.sequence_length)
 
         X_test_tensor = torch.tensor(X_seq, dtype=torch.float32)
         y_test_tensor = torch.tensor(y_seq, dtype=torch.long)
@@ -515,6 +599,7 @@ class Gateway(Node):
 
         self.evaluate_model(self.local_model, test_loader, threshold, self.device)
 
+
 class Fog(Node):
     def __init__(self, node_id, name):
         super().__init__(node_id, name)
@@ -522,55 +607,69 @@ class Fog(Node):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.global_model = None
         self.input_dim = 87
-        self.sequence_length = 10
-        self.received_weights = None
+        self.sequence_length = SEQUENCE_LENGTH
+        self.received_packets = []
+        self.total_samples_under_fog = 0
 
     def receive_data(self, data, source):
         super().receive_data(data, source)
-        if isinstance(data, list):
-            self.received_weights = data
-        elif isinstance(data, dict) and 'weights' in data:
-            if isinstance(data['weights'], list):
-                self.received_weights = data['weights']
-            else:
-                self.received_weights = [data['weights']]
+        if isinstance(data, dict) and 'packets' in data:
+            self.received_packets = data['packets']
         else:
-            self.received_weights = []
+            self.received_packets = []
 
-    def aggregate_weights(self, weights_list):
-        if isinstance(weights_list, dict):
-            weights_list = [weights_list]
+    def aggregate_weights(self, packets_list):
+        if not packets_list:
+            raise ValueError(f"[{self.node_name}] No packets received for aggregation.")
 
-        if not weights_list or not isinstance(weights_list[0], dict):
-            raise ValueError(f"[{self.node_name}] Invalid weight list received for aggregation: {type(weights_list)}")
+        total_samples = sum(p.get('num_samples', 0) for p in packets_list)
+        self.total_samples_under_fog = total_samples
+        
+        if total_samples == 0:
+            print(f"[{self.node_name}] Warning: Total sample count is 0, using simple average.")
+            total_samples = len(packets_list)
+            weights_list = [p['weights'] for p in packets_list]
+            avg_weights = {k: v.to(torch.float32) for k, v in weights_list[0].items()}
+            for k in avg_weights:
+                for i in range(1, len(weights_list)):
+                    avg_weights[k] += weights_list[i][k].to(torch.float32)
+                avg_weights[k] /= len(weights_list)
+            return avg_weights
 
-        avg_weights = {k: v.to(torch.float32) for k, v in weights_list[0].items()}
+        # Weighted FedAvg
+        first_packet = packets_list[0]
+        n0 = first_packet.get('num_samples', 0)
+        avg_weights = {k: (v.to(torch.float32) * n0) for k, v in first_packet['weights'].items()}
+
+        for i in range(1, len(packets_list)):
+            p = packets_list[i]
+            n_k = p.get('num_samples', 0)
+            for k in avg_weights:
+                avg_weights[k] += p['weights'][k].to(torch.float32) * n_k
+
         for k in avg_weights:
-            for i in range(1, len(weights_list)):
-                avg_weights[k] += weights_list[i][k].to(torch.float32)
-            avg_weights[k] /= len(weights_list)
+            avg_weights[k] /= total_samples
+
         return avg_weights
 
     def process_data(self):
-        if not hasattr(self, 'received_weights') or not self.received_weights:
+        if not hasattr(self, 'received_packets') or not self.received_packets:
             print(f"[{self.node_name}] No weights to aggregate.")
             return
 
-        self.global_model_weights = self.aggregate_weights(self.received_weights)
-        print(f"[{self.node_name}] Global model aggregated. Now sent to Edge nodes.\n")
+        self.global_model_weights = self.aggregate_weights(self.received_packets)
+        print(f"[{self.node_name}] Global model aggregated via Weighted FedAvg (Total samples: {self.total_samples_under_fog}). Sent to Cloud.\n")
 
-        # Get input dimension from the first layer of aggregated weights
-        # This assumes the embedding layer is named 'embedding.weight'
+        # Get input dimension dynamically
         for key in self.global_model_weights.keys():
             if 'embedding.weight' in key:
                 self.input_dim = self.global_model_weights[key].shape[1]
                 break
 
         if self.input_dim is None:
-            print(f"[{self.node_name}] Warning: Could not determine input dimension, using default 78")
+            print(f"[{self.node_name}] Warning: Could not determine input dimension, using default 87")
             self.input_dim = 87
 
-        # Add model creation and saving
         self.global_model = MiniTransformerAutoencoder(
             input_dim=self.input_dim,
             latent_dim=32,
@@ -597,7 +696,8 @@ class Fog(Node):
         if self.parent:
             packet = {
                 'node_id': self.node_id,
-                'weights': self.global_model_weights
+                'weights': self.global_model_weights,
+                'num_samples': self.total_samples_under_fog
             }
             self.send_data(packet, self.parent)
 
@@ -620,7 +720,7 @@ class Fog(Node):
         y_sampled = np.array(self.y)
 
         # Convert and generate sequences
-        X_seq, y_seq = self.create_sequences_with_labels(X_sampled, y_sampled, seq_len=10)
+        X_seq, y_seq = self.create_sequences_with_labels(X_sampled, y_sampled, seq_len=self.sequence_length)
 
         X_test_tensor = torch.tensor(X_seq, dtype=torch.float32)
         y_test_tensor = torch.tensor(y_seq, dtype=torch.long)
@@ -649,20 +749,22 @@ class Proxy(Node):
     def __init__(self, node_id, name):
         super().__init__(node_id, name)
         self.received_weights = None
+        self.received_num_samples = 0
         self.global_model_weights = None
         self.global_model = []
-
 
     def receive_data(self, data, source):
         super().receive_data(data, source)
         if 'weights' in data:
             self.received_weights = data['weights']
+            self.received_num_samples = data.get('num_samples', 0)
 
     def process_data(self):
         if self.parent:
           packet = {
               'node_id': self.node_id,
-              'weights': self.received_weights
+              'weights': self.received_weights,
+              'num_samples': self.received_num_samples
           }
           self.send_data(packet, self.parent)
 
@@ -679,43 +781,58 @@ class Cloud(Node):
         self.global_model_weights = None
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.input_dim = None
-        self.sequence_length = 10
+        self.sequence_length = SEQUENCE_LENGTH
         self.global_model = None
-        self.received_weights = None
+        self.received_packets = []
 
     def receive_data(self, data, source):
         super().receive_data(data, source)
-        if isinstance(data, list):
-            self.received_weights = data
-        elif isinstance(data, dict) and 'weights' in data:
-            if isinstance(data['weights'], list):
-                self.received_weights = data['weights']
-            else:
-                self.received_weights = [data['weights']]
-        else:
-            self.received_weights = []
+        if not hasattr(self, 'received_packets') or not isinstance(self.received_packets, list):
+            self.received_packets = []
+        if isinstance(data, dict) and 'weights' in data:
+            self.received_packets.append(data)
 
-    def aggregate_weights(self, weights_list):
-        if isinstance(weights_list, dict):
-            weights_list = [weights_list]
+    def aggregate_weights(self, packets_list):
+        if not packets_list:
+            raise ValueError(f"[{self.node_name}] No packets received for aggregation.")
 
-        if not weights_list or not isinstance(weights_list[0], dict):
-            raise ValueError(f"[{self.node_name}] Invalid weight list received for aggregation: {type(weights_list)}")
+        total_samples = sum(p.get('num_samples', 0) for p in packets_list)
+        if total_samples == 0:
+            print(f"[{self.node_name}] Warning: Total sample count is 0, using simple average.")
+            total_samples = len(packets_list)
+            weights_list = [p['weights'] for p in packets_list]
+            avg_weights = {k: v.to(torch.float32) for k, v in weights_list[0].items()}
+            for k in avg_weights:
+                for i in range(1, len(weights_list)):
+                    avg_weights[k] += weights_list[i][k].to(torch.float32)
+                avg_weights[k] /= len(weights_list)
+            return avg_weights
 
-        avg_weights = {k: v.to(torch.float32) for k, v in weights_list[0].items()}
+        # Weighted FedAvg
+        first_packet = packets_list[0]
+        n0 = first_packet.get('num_samples', 0)
+        avg_weights = {k: (v.to(torch.float32) * n0) for k, v in first_packet['weights'].items()}
+
+        for i in range(1, len(packets_list)):
+            p = packets_list[i]
+            n_k = p.get('num_samples', 0)
+            for k in avg_weights:
+                avg_weights[k] += p['weights'][k].to(torch.float32) * n_k
+
         for k in avg_weights:
-            for i in range(1, len(weights_list)):
-                avg_weights[k] += weights_list[i][k].to(torch.float32)
-            avg_weights[k] /= len(weights_list)
+            avg_weights[k] /= total_samples
+
         return avg_weights
 
     def process_data(self):
-        if not hasattr(self, 'received_weights') or not self.received_weights:
+        if not hasattr(self, 'received_packets') or not self.received_packets:
             print(f"[{self.node_name}] No weights to aggregate.")
             return
 
-        self.global_model_weights = self.aggregate_weights(self.received_weights)
-        print(f"[{self.node_name}] Global model aggregated. Now sent to Fog nodes.\n")
+        self.global_model_weights = self.aggregate_weights(self.received_packets)
+        print(f"[{self.node_name}] Global model aggregated via Weighted FedAvg at Cloud. Now sent to Fog nodes.\n")
+        
+        self.received_packets = []
 
         # Get input dimension dynamically from weights
         for key in self.global_model_weights.keys():
@@ -762,7 +879,7 @@ class Cloud(Node):
         y_sampled = np.array(self.y)
 
         # Convert and generate sequences
-        X_seq, y_seq = self.create_sequences_with_labels(X_sampled, y_sampled, seq_len=10)
+        X_seq, y_seq = self.create_sequences_with_labels(X_sampled, y_sampled, seq_len=self.sequence_length)
 
         X_test_tensor = torch.tensor(X_seq, dtype=torch.float32)
         y_test_tensor = torch.tensor(y_seq, dtype=torch.long)
@@ -795,7 +912,7 @@ class Application(Node):
         y_sampled = self.y_test[:sample_size]
 
         # Convert and generate sequences
-        seq_len = 10
+        seq_len = SEQUENCE_LENGTH
         X_seq, y_seq = self.create_sequences_with_labels(X_sampled, y_sampled, seq_len=seq_len)
 
         self.X = X_seq
@@ -879,36 +996,56 @@ class IOTSimulation:
         self.edge_nodes = []
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # Preprocess entire dataset first to ensure consistency
+        # Split raw dataframe into Train (70%) and Test (30%) first
         self.raw_df = pd.read_csv(self.file_path)
-        dp_full = preprocess_data(self.raw_df)
-        clean_df_full, X_full, y_full = dp_full.run()
+        raw_target = 'Label' if 'Label' in self.raw_df.columns else self.raw_df.columns[-1]
+        df_train, df_test = train_test_split(
+            self.raw_df, test_size=0.30, random_state=42, stratify=self.raw_df[raw_target]
+        )
+        df_train = df_train.reset_index(drop=True)
+        df_test = df_test.reset_index(drop=True)
         
-        print(f"Full preprocessed data: X={X_full.shape}, y={y_full.shape}")
+        # Fit preprocess on raw train
+        dp = preprocess_data()
+        dp.fit(df_train, k=25)
+        self.feature_names = dp.selected_features
         
-        self.feature_names = dp_full.features
+        # Transform Train and Test splits
+        clean_df_train, X_train_full, y_train_full = dp.transform(df_train)
+        clean_df_test, X_test_full, y_test_full = dp.transform(df_test)
         
-        # Split into Train (A) and Test (B) - e.g. 70% Train, 30% Test
-        X_train_full, X_test_full, y_train_full, y_test_full = train_test_split(
-            X_full, y_full, test_size=0.30, random_state=42, stratify=y_full
+        print(f"Train preprocessed data: X={X_train_full.shape}, y={y_train_full.shape}")
+        print(f"Test preprocessed data: X={X_test_full.shape}, y={y_test_full.shape}")
+        
+        # Split Train (Part A) into Train-Sub (85%) and Validation Threshold Tuning (15%)
+        indices = np.arange(len(X_train_full))
+        idx_train_sub, idx_val_thresh = train_test_split(
+            indices, test_size=0.15, random_state=42, stratify=y_train_full
         )
         
-        # Partition Train (Part A) into A.1 and A.2 for Edge nodes
-        split_idx = len(X_train_full) // 2
-        X_half1 = X_train_full[:split_idx]
-        y_half1 = y_train_full[:split_idx]
-        clean_df_half1 = clean_df_full.iloc[:split_idx].reset_index(drop=True)
+        X_train_sub = X_train_full[idx_train_sub]
+        y_train_sub = y_train_full[idx_train_sub]
+        clean_df_train_sub = clean_df_train.iloc[idx_train_sub].reset_index(drop=True)
         
-        X_half2 = X_train_full[split_idx:]
-        y_half2 = y_train_full[split_idx:]
-        clean_df_half2 = clean_df_full.iloc[split_idx:].reset_index(drop=True)
+        self.X_val_thresh = X_train_full[idx_val_thresh]
+        self.y_val_thresh = y_train_full[idx_val_thresh]
+        
+        # Partition Train-Sub into A.1 and A.2 for Edge nodes
+        split_idx = len(X_train_sub) // 2
+        X_half1 = X_train_sub[:split_idx]
+        y_half1 = y_train_sub[:split_idx]
+        clean_df_half1 = clean_df_train_sub.iloc[:split_idx].reset_index(drop=True)
+        
+        X_half2 = X_train_sub[split_idx:]
+        y_half2 = y_train_sub[split_idx:]
+        clean_df_half2 = clean_df_train_sub.iloc[split_idx:].reset_index(drop=True)
         
         # Create Edge nodes
         edge1 = Edge(1, "Sensor 1", clean_df_half1, X_half1, y_half1)
         edge2 = Edge(2, "Sensor 2", clean_df_half2, X_half2, y_half2)
         self.edge_nodes.extend([edge1, edge2])
         
-        # Partition Test (Part B) into B.1, B.2, B.3 using StratifiedKFold to ensure balanced class distributions
+        # Partition Test (Part B) into B.1, B.2, B.3 using StratifiedKFold (Test partition is 100% untouched)
         skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
         folds = list(skf.split(X_test_full, y_test_full))
         
@@ -957,39 +1094,42 @@ class IOTSimulation:
 
         self.cloud_nodes[0].add_child(self.proxy_nodes[0])
 
-    def run(self):
+    def run(self, num_rounds=5):
         gc.collect()
         torch.cuda.empty_cache()
-        print("\n========== Federated Round START ==========")
+        
+        for r in range(1, num_rounds + 1):
+            print(f"\n========== Federated Round {r}/{num_rounds} START ==========")
 
-        # Step 1: Edge training
-        for edge in self.edge_nodes:
-            edge.process_data()
-            edge.send_model_weights()
+            # Step 1: Edge training
+            for edge in self.edge_nodes:
+                edge.process_data()
+                edge.send_model_weights()
 
-        # Step 2: Gateways forward data to Fog
-        for gateway in self.gateway_nodes:
-            gateway.process_data()
+            # Step 2: Gateways forward data to Fog
+            for gateway in self.gateway_nodes:
+                gateway.process_data()
 
-        # Step 3: Fog aggregates weights
-        for fog_node in self.fog_nodes:
-            fog_node.process_data()
-            fog_node.send_global_weights()
+            # Step 3: Fog aggregates weights
+            for fog_node in self.fog_nodes:
+                fog_node.process_data()
+                fog_node.send_global_weights()
 
-        # Step 4: Proxy forwards to Cloud
-        for proxy in self.proxy_nodes:
-            proxy.process_data()
+            # Step 4: Proxy forwards to Cloud
+            for proxy in self.proxy_nodes:
+                proxy.process_data()
 
-        # Step 5: Cloud aggregates global model
-        for cloud in self.cloud_nodes:
-            cloud.process_data()
+            # Step 5: Cloud aggregates global model
+            for cloud in self.cloud_nodes:
+                cloud.process_data()
+
+            print(f"========== Federated Round {r}/{num_rounds} END ==========\n")
 
         # Saving the Global model
         final_model = self.cloud_nodes[0].global_model
         torch.save(final_model, "Global_Model_Final.pth")
         print("Global model saved!")
 
-        print("========== Federated Round END ==========\n")
         self.app_node = Application(
             node_id=1, 
             name="Application Layer 1", 
@@ -1020,18 +1160,18 @@ class IOTSimulation:
             all_normal = all_normal[indices]
             
         # Create normal sequences
-        seq_len = 10
+        seq_len = SEQUENCE_LENGTH
         sequences = []
         for i in range(len(all_normal) - seq_len + 1):
             sequences.append(all_normal[i:i+seq_len])
         sequences = np.array(sequences)
         
         if len(sequences) == 0:
-            print("[Warning] No normal training sequences found. Defaulting threshold to 0.1")
-            return 0.1
+            print("[Warning] No normal training sequences found. Defaulting mean to 0.5, std to 0.1")
+            return 0.5, 0.1
             
         # Compute reconstruction error per sequence
-        batch_size = 256
+        batch_size = 128
         with torch.no_grad():
             for i in range(0, len(sequences), batch_size):
                 batch_seq = sequences[i:i+batch_size]
@@ -1043,10 +1183,97 @@ class IOTSimulation:
         errors = np.array(errors)
         mean_err = np.mean(errors)
         std_err = np.std(errors)
-        threshold = mean_err + 4 * std_err
         print(f"[Threshold Calculation] Mean training reconstruction error: {mean_err:.6f}, Std: {std_err:.6f}")
-        print(f"[Threshold Calculation] Anomaly Threshold (mean + 4*std): {threshold:.6f}")
-        return threshold
+        return mean_err, std_err
+
+    def create_sequences_with_labels(self, X, y, seq_len=10):
+        sequences = []
+        labels = []
+        for i in range(len(X) - seq_len + 1):
+            sequences.append(X[i:i+seq_len])
+            labels.append(np.max(y[i : i + seq_len]))
+        return np.array(sequences), np.array(labels)
+
+    def optimize_threshold(self, model, mean_err, std_err):
+        model.to(self.device)
+        model.eval()
+        
+        # Generate validation sequences
+        X_seq, y_seq = self.create_sequences_with_labels(self.X_val_thresh, self.y_val_thresh, seq_len=SEQUENCE_LENGTH)
+        X_tensor = torch.tensor(X_seq, dtype=torch.float32).to(self.device)
+        y_true = np.array(y_seq)
+        
+        criterion = nn.MSELoss(reduction='none')
+        mse_list = []
+        batch_size = 128
+        with torch.no_grad():
+            for i in range(0, len(X_tensor), batch_size):
+                batch_tensor = X_tensor[i:i+batch_size]
+                reconstructed = model(batch_tensor)
+                mse = criterion(reconstructed, batch_tensor).mean(dim=[1, 2])
+                mse_list.extend(mse.cpu().numpy())
+        mse_errors = np.array(mse_list)
+        
+        multipliers = [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5]
+        precisions = []
+        recalls = []
+        f1s = []
+        bal_accs = []
+        
+        best_f1 = -1.0
+        best_multiplier = 2.0
+        best_threshold = mean_err + 2.0 * std_err
+        best_recall = 0.0
+        
+        print("\n----- Threshold Optimization Sweep (Tuning Set) -----")
+        print(f"{'Multiplier':<12}{'Threshold':<12}{'Precision':<10}{'Recall':<10}{'F1-Score':<10}{'Balanced Acc':<14}")
+        print("-" * 68)
+        
+        from sklearn.metrics import precision_recall_fscore_support, balanced_accuracy_score
+        for m in multipliers:
+            thresh = mean_err + m * std_err
+            preds = (mse_errors > thresh).astype(int)
+            
+            # Compute metrics for class 1 (anomaly)
+            precision, recall, f1, _ = precision_recall_fscore_support(y_true, preds, average='binary', pos_label=1, zero_division=0)
+            bal_acc = balanced_accuracy_score(y_true, preds)
+            
+            precisions.append(precision)
+            recalls.append(recall)
+            f1s.append(f1)
+            bal_accs.append(bal_acc)
+            
+            print(f"{m:<12.1f}{thresh:<12.6f}{precision:<10.4f}{recall:<10.4f}{f1:<10.4f}{bal_acc:<14.4f}")
+            
+            # Select multiplier that maximizes F1-Score
+            if f1 > best_f1:
+                best_f1 = f1
+                best_multiplier = m
+                best_threshold = thresh
+                best_recall = recall
+                
+        print(f"\n[Optimization] Selected Best Multiplier: {best_multiplier}σ")
+        print(f"[Optimization] Threshold value: {best_threshold:.6f}")
+        print(f"[Optimization] Validation F1-Score: {best_f1:.4f}")
+        print(f"[Optimization] Validation Recall: {best_recall:.4f}")
+        
+        # Save Threshold Tuning Curves plot
+        plt.figure(figsize=(10, 6))
+        plt.plot(multipliers, precisions, label='Precision', marker='o', color='green', linewidth=1.5)
+        plt.plot(multipliers, recalls, label='Recall', marker='s', color='orange', linewidth=1.5)
+        plt.plot(multipliers, f1s, label='F1-Score', marker='^', color='blue', linewidth=2)
+        plt.axvline(best_multiplier, color='black', linestyle='--', label=f'Optimal Multiplier ({best_multiplier}σ)')
+        plt.xlabel('Multiplier (σ)')
+        plt.ylabel('Score')
+        plt.title('Threshold Multiplier Sweep vs Evaluation Metrics')
+        plt.grid(True)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig('Threshold_Tuning_Curves.png')
+        plt.close()
+        print("[Plot] Threshold tuning curves saved to 'Threshold_Tuning_Curves.png'.")
+        
+        return best_threshold
 
     def testing_part(self):
         print("\n========== TESTING PHASE START ==========")
@@ -1058,7 +1285,10 @@ class IOTSimulation:
             return
             
         # Compute threshold dynamically
-        self.anomaly_threshold = self.compute_anomaly_threshold(final_model)
+        mean_err, std_err = self.compute_anomaly_threshold(final_model)
+        
+        # Optimize threshold using the clean tuning subset
+        self.anomaly_threshold = self.optimize_threshold(final_model, mean_err, std_err)
         
         # Testing at Gateway Level with B.1
         print(f"\n----- Testing at Gateway Level (using Test Split B.1) -----")
@@ -1080,6 +1310,40 @@ class IOTSimulation:
         print(f"\n----- Testing at Cloud Level (using Test Split B.3) -----")
         for cloud in self.cloud_nodes:
             cloud.eval(None, self.X_part3, self.y_part3, self.anomaly_threshold)
+            
+        # Calculate reconstruction errors for B.3 to plot the distribution curve
+        X_test_seq, y_test_seq = self.create_sequences_with_labels(self.X_part3, self.y_part3, seq_len=SEQUENCE_LENGTH)
+        X_test_tensor = torch.tensor(X_test_seq, dtype=torch.float32).to(self.device)
+        y_test_true = np.array(y_test_seq)
+        
+        criterion = nn.MSELoss(reduction='none')
+        test_errors = []
+        batch_size = 128
+        with torch.no_grad():
+            for i in range(0, len(X_test_tensor), batch_size):
+                batch_tensor = X_test_tensor[i:i+batch_size]
+                reconstructed = final_model(batch_tensor)
+                mse = criterion(reconstructed, batch_tensor).mean(dim=[1, 2])
+                test_errors.extend(mse.cpu().numpy())
+        test_errors = np.array(test_errors)
+        
+        # Separate benign and attack errors
+        benign_errors = test_errors[y_test_true == 0]
+        attack_errors = test_errors[y_test_true == 1]
+        
+        plt.figure(figsize=(10, 6))
+        plt.hist(benign_errors, bins=50, alpha=0.6, label='Benign sequences', color='blue', density=True)
+        plt.hist(attack_errors, bins=50, alpha=0.6, label='Attack sequences', color='red', density=True)
+        plt.axvline(self.anomaly_threshold, color='black', linestyle='--', linewidth=1.5, label=f'Threshold ({self.anomaly_threshold:.6f})')
+        plt.xlabel('Reconstruction MSE')
+        plt.ylabel('Density')
+        plt.title('Reconstruction Error Distribution (Benign vs Attack)')
+        plt.grid(True)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig('Reconstruction_Error_Distribution.png')
+        plt.close()
+        print("[Plot] Reconstruction error distribution saved to 'Reconstruction_Error_Distribution.png'.")
     
         gc.collect()
         torch.cuda.empty_cache()

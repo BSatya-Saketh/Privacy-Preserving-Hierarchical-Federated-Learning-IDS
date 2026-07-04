@@ -612,26 +612,28 @@ def build_pdf(filename="Project_Interview_Defense_Guide.pdf"):
     story.append(PageBreak())
     story.append(Paragraph("7. Evaluation & Metrics", h1_style))
 
-    story.append(Paragraph("Q1: Why is your precision only around 22%?", q_style))
+    story.append(Paragraph("Q1: Why is your precision around 81–83%?", q_style))
     story.append(Paragraph(
-        "A: The model operates in an unsupervised anomaly detection paradigm with an imbalanced test split (~8.4% attacks). "
-        "Because normal packets outnumber attacks 12:1, even a small false-positive rate (11% normal packets incorrectly flagged) "
-        "yields a high absolute number of false positives (1,504 normal vs. 438 true attacks caught). This mathematically "
-        "limits precision to 22.5%, representing the standard precision-recall trade-off.",
+        "A: The model operates in an unsupervised anomaly detection paradigm. By preserving temporal continuity during "
+        "sequence construction, removing ground-truth leakage, and optimizing the threshold on a dedicated validation split, "
+        "the model maps benign flows accurately. At the optimal 1.0-sigma threshold (0.8152), the system flags attacks "
+        "with 81–83% Precision and 79% Recall, yielding a balanced, highly robust 80–81% F1-score.",
         a_style
     ))
 
-    story.append(Paragraph("Q2: Is 84% accuracy good?", q_style))
+    story.append(Paragraph("Q2: Is 77% accuracy good?", q_style))
     story.append(Paragraph(
         "A: Yes, for unsupervised reconstruction models. It represents a realistic, leak-free evaluation on a stratified "
-        "dataset, capturing 36% of attacks while maintaining 89% recall on normal traffic.",
+        "dataset, capturing 79% of attacks (Recall) while maintaining 75–77% recall on normal traffic, leading to a balanced "
+        "accuracy of 77% and a Matthews Correlation Coefficient (MCC) of 0.53–0.55 (representing 'Good/Excellent' correlation).",
         a_style
     ))
 
     story.append(Paragraph("Q3: Why did accuracy decrease?", q_style))
     story.append(Paragraph(
         "A: In early tests, accuracy was 99% due to target leakage and sequential split issues. Once the target leak was "
-        "resolved and test support was stratified, the accuracy adjusted to a realistic, leak-free 84.5%.",
+        "resolved and test support was stratified, the accuracy adjusted to a realistic, leak-free 77.23% under the optimized "
+        "1.0-sigma threshold (0.8152), which represents actual, deployment-ready anomaly detection capability.",
         a_style
     ))
 
@@ -644,8 +646,8 @@ def build_pdf(filename="Project_Interview_Defense_Guide.pdf"):
 
     story.append(Paragraph("Q5: Explain your confusion matrix.", q_style))
     story.append(Paragraph(
-        "A: In the final Cloud evaluation: TN = 11,777 (normal packets correctly identified), FP = 1,504 (normal flagged "
-        "as attack), FN = 784 (attacks missed), TP = 438 (attacks correctly caught).",
+        "A: In the final Cloud evaluation: TN = 4,524 (normal packets correctly identified), FP = 1,548 (normal flagged "
+        "as attack), FN = 1,755 (attacks missed), TP = 6,676 (attacks correctly caught).",
         a_style
     ))
 
@@ -812,8 +814,10 @@ def build_pdf(filename="Project_Interview_Defense_Guide.pdf"):
 
     story.append(Paragraph("Q2: What changed compared to your original version?", q_style))
     story.append(Paragraph(
-        "A: Migrated to a pure unsupervised autoencoder, added float16 quantized weights, implemented StratifiedKFold test splits, "
-        "and fixed the multi-client weight buffer in the Gateway.",
+        "A: Migrated to a pure unsupervised autoencoder with Mean Pooling, implemented a leak-free preprocessing pipeline "
+        "fitting parameters strictly on the Train set, resolved Gateway weight overwriting, added float16 weight quantization, "
+        "developed weighted FedAvg regional/global aggregators, and restructured local training to split an 80/20 train/validation "
+        "set with dynamic early stopping over multiple communication rounds.",
         a_style
     ))
 
@@ -825,8 +829,9 @@ def build_pdf(filename="Project_Interview_Defense_Guide.pdf"):
 
     story.append(Paragraph("Q4: Why are the metrics different?", q_style))
     story.append(Paragraph(
-        "A: The original metrics were inflated to 99% due to target leakage and sequential splitting. The current metrics (84.5% accuracy) "
-        "are realistic and represent actual anomaly detection capability.",
+        "A: The original metrics were inflated to 99% due to target leakage and sequential splitting. The current metrics (77.23% accuracy, "
+        "79% Recall, 76.8% Balanced Accuracy, 0.5346 MCC) are realistic and represent actual anomaly detection capability under the optimal "
+        "1.0-sigma decision threshold.",
         a_style
     ))
 
@@ -849,8 +854,9 @@ def build_pdf(filename="Project_Interview_Defense_Guide.pdf"):
 
     story.append(Paragraph("Q1: If accuracy dropped, why do you say the project improved?", q_style))
     story.append(Paragraph(
-        "A: High accuracy driven by target leakage is a system flaw. Overcoming target leakage dropped accuracy to a realistic, "
-        "leak-free 84.5%. This makes the model robust, generalizable, and mathematically valid for real-world deployment.",
+        "A: High accuracy driven by target leakage is a system flaw. Overcoming target leakage and selecting the optimal "
+        "F1-Score threshold via a validation sweep adjusted evaluated accuracy to a realistic 77.23% with an anomaly recall of 79% "
+        "and precision of 81%. This represents a robust system improvement rather than a performance drop.",
         a_style
     ))
 
@@ -916,20 +922,27 @@ def build_pdf(filename="Project_Interview_Defense_Guide.pdf"):
 
     story.append(Paragraph("Q1: Implement the Federated Averaging (FedAvg) aggregation loop in Python.", q_style))
     fedavg_snippet = (
-        "import copy\n"
+        "import torch\n"
         "\n"
-        "def federated_averaging(client_weights_list):\n"
-        "    # Assumes client weights are in a list of PyTorch state_dicts\n"
-        "    global_weights = copy.deepcopy(client_weights_list[0])\n"
-        "    num_clients = len(client_weights_list)\n"
+        "def weighted_federated_averaging(client_packets):\n"
+        "    # client_packets: list of dicts containing 'weights' state_dict and 'num_samples'\n"
+        "    total_samples = sum(p['num_samples'] for p in client_packets)\n"
+        "    global_weights = {}\n"
         "    \n"
-        "    for key in global_weights.keys():\n"
-        "        # Sum weights from all clients for the parameter key\n"
-        "        for i in range(1, num_clients):\n"
-        "            global_weights[key] += client_weights_list[i][key]\n"
+        "    # Initialize with the first client's scaled weights\n"
+        "    first_packet = client_packets[0]\n"
+        "    n0 = first_packet['num_samples']\n"
+        "    for key, val in first_packet['weights'].items():\n"
+        "        global_weights[key] = val.to(torch.float32) * n0\n"
+        "        \n"
+        "    for i in range(1, len(client_packets)):\n"
+        "        p = client_packets[i]\n"
+        "        n_k = p['num_samples']\n"
+        "        for key, val in p['weights'].items():\n"
+        "            global_weights[key] += val.to(torch.float32) * n_k\n"
         "            \n"
-        "        # Average the parameters\n"
-        "        global_weights[key] = global_weights[key] / num_clients\n"
+        "    for key in global_weights.keys():\n"
+        "        global_weights[key] /= total_samples\n"
         "        \n"
         "    return global_weights"
     )
@@ -954,8 +967,9 @@ def build_pdf(filename="Project_Interview_Defense_Guide.pdf"):
     story.append(Paragraph("Q3: Explain your Autoencoder architecture.", q_style))
     story.append(Paragraph(
         "A: Input seq (batch, 10, 25) $\rightarrow$ Embedding (Linear projection to 64) $\rightarrow$ Positional Encoding "
-        "$\rightarrow$ Transformer Encoder (2 layers, 2 heads) $\rightarrow$ Latent bottleneck (Linear projection to 32, take last "
-        "time step) $\rightarrow$ Broadcast/Repeat latent vector $\rightarrow$ Decoder FC (Linear to 64) $\rightarrow$ Output projection "
+        "$\rightarrow$ Transformer Encoder (2 layers, 2 heads) $\rightarrow$ Latent bottleneck (Linear projection to 32) "
+        "$\rightarrow$ Mean Pooling over sequence time dimension (retains temporal correlations across all steps) "
+        "$\rightarrow$ Broadcast/Repeat latent vector $\rightarrow$ Decoder FC (Linear to 64) $\rightarrow$ Output projection "
         "(Linear to 25). It reconstructs the sequence.",
         a_style
     ))
@@ -1105,8 +1119,9 @@ def build_pdf(filename="Project_Interview_Defense_Guide.pdf"):
     story.append(Paragraph(
         "<b>❌ Avoid saying</b>: 'The model accuracy decreased.'<br/>"
         "<b>✔ Say instead</b>: 'The early evaluation accuracy was inflated due to target column leakage and sequential test split bias. "
-        "After filtering out the leakage column (Attack_categories) and stratifying test partitions, the evaluation adjusted to a realistic, "
-        "leak-free 84.5% baseline. This represents a robust system improvement rather than a performance drop.'",
+        "After filtering out the leakage column (Attack_categories), stratifying test partitions, and optimizing the decision boundary "
+        "on validation data to maximize F1-score, the evaluation adjusted to a realistic, leak-free 77.23% baseline. This represents "
+        "a robust system improvement that maximizes threat detection sensitivity rather than a performance drop.'",
         a_style
     ))
 

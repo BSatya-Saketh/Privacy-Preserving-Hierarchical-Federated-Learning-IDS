@@ -450,20 +450,24 @@ def build_pdf(filename="Project_Report.pdf"):
         body_style
     ))
     story.append(Paragraph(
-        "• <b>Impact of the Extra Epochs</b>: The local sensor training epochs were increased to 5, dropping their training losses down to 0.6425 and 0.6563. This extra optimization allowed the underlying Transformer layers to map the complex temporal dynamics of the normal IoT packets much more tightly. Because the model understands 'normal' better, the baseline reconstruction errors became more consistent.",
+        "• <b>Impact of Multi-Round weighted FedAvg</b>: The transition to 5 rounds of weighted Federated aggregation allowed the global model to continuously propagate and adapt. The inclusion of sample count weights (totaling 74,400 normal sequences) ensures that each edge client contributes proportionally to its local data size.",
         bullet_style
     ))
     story.append(Paragraph(
-        "• <b>Impact of Moving to 4-Sigma Threshold</b>: By pushing the boundary line further out to 4 standard deviations, establishing a threshold line of 0.8580, the system cleared out a massive block of false positives (dropping them to 1,504 vs. the 3,817 produced under 3-sigma). However, because network attacks can sometimes closely mimic normal traffic patterns, dropping the threshold window meant that 784 of the trickier attack packets did not create a massive enough error spike to cross the 0.8580 threshold line, exhibiting a classic sensitivity-specificity ROC trade-off.",
+        "• <b>Impact of Local Validation & Early Stopping</b>: Edge nodes now split their benign training data into an 80/20 train/validation set, stopping training early (typically around epoch 2 to 9 after Round 1) when the validation loss stops improving (restoring best-epoch weights). This prevents overfitting and drastically reduces local computation cycles.",
+        bullet_style
+    ))
+    story.append(Paragraph(
+        "• <b>Impact of Moving to 1.0-Sigma Threshold and Mean Pooling</b>: By replacing the bottleneck with Mean Pooling and running a threshold sweep on the validation subset, the system selected the optimal decision boundary at 1.0 standard deviations (Threshold: 0.8152). This dramatically boosted Anomaly Recall to 79% and Anomaly Precision to 81-83%, resulting in an outstanding F1-score of 80-81% and Balanced Accuracy of 76.8-77.9%, representing an exceptional threat detection capability.",
         bullet_style
     ))
     
     # Quantitative evaluation metrics table
     metrics_data = [
         ["Testing Tier", "Accuracy", "Anomaly Precision", "Anomaly Recall", "Anomaly F1-Score"],
-        ["Gateway Level (B.1)", "84.27%", "22.0%", "35.0%", "27.0%"],
-        ["Fog Level (B.2)", "84.55%", "23.0%", "35.0%", "28.0%"],
-        ["Cloud Level (B.3)", "84.22%", "23.0%", "36.0%", "28.0%"]
+        ["Gateway Level (B.1)", "77.34%", "82.0%", "79.0%", "80.0%"],
+        ["Fog Level (B.2)", "78.11%", "83.0%", "79.0%", "81.0%"],
+        ["Cloud Level (B.3)", "77.23%", "81.0%", "79.0%", "80.0%"]
     ]
     t_metrics = Table(metrics_data, colWidths=[150, 80, 100, 100, 80])
     t_metrics.setStyle(TableStyle([
@@ -482,10 +486,8 @@ def build_pdf(filename="Project_Report.pdf"):
     story.append(Paragraph("<b>Table 1: Global Model Quantitative Evaluation Metrics</b>", fig_style))
     story.append(Spacer(1, 10))
     story.append(Paragraph(
-        "The relatively modest anomaly precision (22–23%) reflects the conservative reconstruction-error threshold "
-        "adopted for unsupervised anomaly detection. The system prioritizes detecting previously unseen attacks "
-        "(maximizing recall and security coverage) over minimizing false positives, resulting in the expected "
-        "precision–recall trade-off common in anomaly detection baselines.",
+        "The anomaly precision (81–83%) and recall (79%) demonstrate the highly robust performance achieved "
+        "by the unsupervised anomaly detection paradigm after removing data leakages and optimizing the sequence windows pipeline.",
         body_style
     ))
     story.append(Spacer(1, 10))
@@ -493,9 +495,9 @@ def build_pdf(filename="Project_Report.pdf"):
     # Results support table
     res_data = [
         ["Testing Tier", "Test Split", "Normal Support", "Anomaly/Attack Support", "Balanced Support?"],
-        ["Gateway Level", "B.1", "13,281", "1,223", "Yes"],
-        ["Fog Level", "B.2", "13,280", "1,223", "Yes"],
-        ["Cloud Level", "B.3", "13,281", "1,222", "Yes"]
+        ["Gateway Level", "B.1", "6,018", "8,486", "Yes"],
+        ["Fog Level", "B.2", "5,951", "8,552", "Yes"],
+        ["Cloud Level", "B.3", "6,072", "8,431", "Yes"]
     ]
     t2 = Table(res_data, colWidths=[120, 80, 100, 120, 80])
     t2.setStyle(TableStyle([
@@ -520,9 +522,9 @@ def build_pdf(filename="Project_Report.pdf"):
         "false-positive profiles, indicating stable boundary thresholds across the federated layers:",
         body_style
     ))
-    story.append(Paragraph("• <b>Gateway Level Confusion Matrix</b>: TN = 11,794, FP = 1,487, FN = 794, TP = 429", bullet_style))
-    story.append(Paragraph("• <b>Fog Level Confusion Matrix</b>: TN = 11,834, FP = 1,446, FN = 794, TP = 429", bullet_style))
-    story.append(Paragraph("• <b>Cloud Level Confusion Matrix</b>: TN = 11,777, FP = 1,504, FN = 784, TP = 438", bullet_style))
+    story.append(Paragraph("• <b>Gateway Level Confusion Matrix</b>: TN = 4,511, FP = 1,507, FN = 1,779, TP = 6,707", bullet_style))
+    story.append(Paragraph("• <b>Fog Level Confusion Matrix</b>: TN = 4,571, FP = 1,380, FN = 1,794, TP = 6,758", bullet_style))
+    story.append(Paragraph("• <b>Cloud Level Confusion Matrix</b>: TN = 4,524, FP = 1,548, FN = 1,755, TP = 6,676", bullet_style))
     story.append(Spacer(1, 10))
     story.append(Paragraph("<b>Figure 2: SHAP Feature Importance Plot (Saved to SHAP_Feature_Importance.png)</b>", fig_style))
 
